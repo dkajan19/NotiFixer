@@ -3,6 +3,7 @@ package com.dkajan.notifixer
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -28,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -379,7 +381,9 @@ fun MainContent(
 @Composable
 fun SavedTab(pm: PackageManager, savedApps: MutableList<AppItem>, showWarning: Boolean, onDismissRequest: () -> Unit, onDataChanged: () -> Unit) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var appToDelete by remember { mutableStateOf<AppItem?>(null) }
+    var relaunchingPackage by remember { mutableStateOf<String?>(null) }
 
     val sortedSavedApps = remember(savedApps.size, savedApps.map { it.packageName }.hashCode()) {
         savedApps.sortedBy { it.name.lowercase() }
@@ -441,13 +445,39 @@ fun SavedTab(pm: PackageManager, savedApps: MutableList<AppItem>, showWarning: B
                     headlineContent = { Text(app.name) },
                     supportingContent = { Text(app.packageName) },
                     trailingContent = {
-                        Switch(
-                            checked = app.isEnabled.value,
-                            onCheckedChange = { checked ->
-                                app.isEnabled.value = checked
-                                scope.launch(Dispatchers.IO) { runAdbCommand(app.packageName, checked) }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                enabled = relaunchingPackage != app.packageName,
+                                onClick = {
+                                    scope.launch {
+                                        relaunchingPackage = app.packageName
+                                        val (ok, message) = withContext(Dispatchers.IO) {
+                                            forceCloseAndRelaunchInBackground(app.packageName)
+                                        }
+                                        relaunchingPackage = null
+                                        Toast.makeText(
+                                            context,
+                                            if (ok) "${app.name} is restarted" else message,
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }
+                            ) {
+                                if (relaunchingPackage == app.packageName) {
+                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(Icons.Default.Refresh, contentDescription = "Force close and relaunch")
+                                }
                             }
-                        )
+
+                            Switch(
+                                checked = app.isEnabled.value,
+                                onCheckedChange = { checked ->
+                                    app.isEnabled.value = checked
+                                    scope.launch(Dispatchers.IO) { runAdbCommand(app.packageName, checked) }
+                                }
+                            )
+                        }
                     }
                 )
             }
