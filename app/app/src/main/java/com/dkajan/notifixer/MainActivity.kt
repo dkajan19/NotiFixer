@@ -191,13 +191,20 @@ class MainActivity : ComponentActivity() {
                 try {
                     val info = pm.getApplicationInfo(pkg, 0)
                     val pInfo = pm.getPackageInfo(pkg, 0)
+
+                    val hasPermission = try {
+                        checkCurrentPermission(pkg)
+                    } catch (e: Exception) {
+                        false
+                    }
+
                     AppItem(
                         info.loadLabel(pm).toString(),
                         pkg,
                         (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0,
                         pInfo.firstInstallTime,
                         pInfo.lastUpdateTime,
-                        mutableStateOf(checkCurrentPermission(pkg))
+                        mutableStateOf(hasPermission)
                     )
                 } catch (e: Exception) { null }
             }
@@ -270,6 +277,84 @@ fun MainContent(
     val uriHandler = LocalUriHandler.current
     val pagerState = rememberPagerState(pageCount = { 2 })
 
+    var showBackupDialog by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        uri?.let {
+            scope.launch(Dispatchers.IO) {
+                val success = BackupUtils.exportToUri(context, it, savedApps.map { app -> app.packageName })
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        if (success) "Backup exported successfully" else "Export failed",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
+
+    val importLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let {
+            scope.launch(Dispatchers.IO) {
+                val importedPackages = BackupUtils.importFromUri(context, it)
+                if (importedPackages.isEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Backup file is empty or invalid", Toast.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
+
+                val newlySavedApps = mutableListOf<AppItem>()
+                for (pkg in importedPackages) {
+                    try {
+                        val info = pm.getApplicationInfo(pkg, 0)
+                        val pInfo = pm.getPackageInfo(pkg, 0)
+
+                        val hasPermission = try {
+                            checkCurrentPermission(pkg)
+                        } catch (e: Exception) {
+                            false
+                        }
+
+                        newlySavedApps.add(
+                            AppItem(
+                                info.loadLabel(pm).toString(),
+                                pkg,
+                                (info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0,
+                                pInfo.firstInstallTime,
+                                pInfo.lastUpdateTime,
+                                mutableStateOf(hasPermission)
+                            )
+                        )
+
+                        kotlinx.coroutines.delay(15)
+                    } catch (e: android.content.pm.PackageManager.NameNotFoundException) {
+                        continue
+                    } catch (e: Exception) {
+                        continue
+                    }
+                }
+
+                val existingPackages = savedApps.map { it.packageName }.toSet()
+                val filteredAppsToAppend = newlySavedApps.filter { it.packageName !in existingPackages }
+
+                withContext(Dispatchers.Main) {
+                    if (filteredAppsToAppend.isNotEmpty()) {
+                        savedApps.addAll(filteredAppsToAppend)
+                        onDataChanged()
+                    }
+                    Toast.makeText(context, "Imported ${filteredAppsToAppend.size} new apps", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
     LaunchedEffect(selectedTab) { if(pagerState.currentPage != selectedTab) pagerState.animateScrollToPage(selectedTab) }
     LaunchedEffect(pagerState.currentPage) { selectedTab = pagerState.currentPage }
 
@@ -297,6 +382,70 @@ fun MainContent(
         )
     }
 
+    if (showBackupDialog) {
+        AlertDialog(
+            onDismissRequest = { showBackupDialog = false },
+            title = { Text("Backup Saved Apps") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "Select an action to manage your saved applications list in JSON format.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+
+                    TextButton(
+                        onClick = {
+                            showBackupDialog = false
+                            importLauncher.launch(arrayOf("application/json"))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Start
+                        ) {
+                            Icon(Icons.Default.ExitToApp, null, modifier = Modifier.graphicsLayer(rotationZ = 90f))
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text("Import backup", style = MaterialTheme.typography.labelLarge)
+                                Text("Load apps list from file", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                            }
+                        }
+                    }
+
+                    TextButton(
+                        onClick = {
+                            showBackupDialog = false
+                            val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmm", java.util.Locale.getDefault()).format(java.util.Date())
+                            val fileName = "notifixer_backup_$timestamp.json"
+
+                            exportLauncher.launch(fileName)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Start
+                        ) {
+                            Icon(Icons.Default.ExitToApp, null)
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text("Export backup", style = MaterialTheme.typography.labelLarge)
+                                Text("Save current list to file", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showBackupDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -317,6 +466,13 @@ fun MainContent(
                 actions = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CompositionLocalProvider(LocalMinimumInteractiveComponentEnforcement provides false) {
+                            IconButton(onClick = { showBackupDialog = true }, modifier = Modifier.size(36.dp)) {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.backup_restore),
+                                    contentDescription = "Backup",
+                                    modifier = Modifier.size(22.dp),
+                                )
+                            }
                             IconButton(onClick = onResetWarning, modifier = Modifier.size(36.dp)) {
                                 Icon(
                                     painter = painterResource(id = R.drawable.lightbulb),
